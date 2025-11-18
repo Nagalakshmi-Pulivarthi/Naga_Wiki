@@ -15,7 +15,45 @@ import esbuild from 'esbuild';
 const outputDir = path.resolve(process.cwd(), 'develop');
 const outputFilePath = path.resolve(outputDir, 'index.html');
 
-esbuild.build({
+const defaultLocale = process.env.FEATHERWIKI_LOCALE ?? 'en-US';
+const localesDir = path.resolve(process.cwd(), 'locales');
+const loadLocale = (localeName) => {
+  const localePath = path.resolve(localesDir, `${localeName}.json`);
+  if (fs.existsSync(localePath)) {
+    return JSON.parse(fs.readFileSync(localePath, 'utf8'));
+  }
+  return null;
+};
+
+const english = loadLocale('en-US') ?? {};
+const activeLocale = loadLocale(defaultLocale) ?? english;
+const localeName = defaultLocale;
+
+const packageJsonPath = path.resolve(process.cwd(), 'package.json');
+const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+
+const devOutputPlugin = {
+  name: 'dev-output',
+  setup (build) {
+    build.onEnd(async (result) => {
+      if (!result || result.errors.length) {
+        if (result?.errors.length) {
+          console.error('watch build failed:', result.errors);
+        }
+        return;
+      }
+
+      try {
+        await handleBuildResult(result);
+      } catch (e) {
+        console.error(e);
+        process.exit(1);
+      }
+    });
+  },
+};
+
+const buildOptions = {
   entryPoints: ['index.js'],
   define: {
     'process.env.NODE_ENV': '"development"',
@@ -25,30 +63,40 @@ esbuild.build({
   write: false,
   bundle: true,
   minify: false,
-  watch: {
-    onRebuild(error, result) {
-      if (error) console.error('watch build failed:', error)
-      else {
-        handleBuildResult(result)
-          .catch((e) => {
-            console.error(e);
-            process.exit(1);
-          });
-      }
+  plugins: [
+    {
+      name: 'transform-content',
+      setup(build) {
+        build.onLoad({ filter: /\.js$/ }, async (args) => {
+          const fileName = path.relative(process.cwd(), args.path);
+          let contents = await fs.promises.readFile(fileName, 'utf8');
+          contents = localize(contents);
+          contents = injectPackageVariables(contents);
+          return { contents };
+        });
+      },
     },
-  },
-  plugins: [],
+    devOutputPlugin,
+  ],
   platform: 'browser',
   format: 'iife',
-  target: [ 'es2015' ],
+  target: ['es2015'],
   outdir: 'build',
-})
-  .then(handleBuildResult)
-  .then(startServer)
-  .catch((e) => {
+};
+
+void start();
+
+async function start () {
+  try {
+    const ctx = await esbuild.context(buildOptions);
+    await ctx.rebuild();
+    await startServer();
+    await ctx.watch();
+  } catch (e) {
     console.error(e);
     process.exit(1);
-  });
+  }
+}
 
 async function handleBuildResult (result) {
   const fileName = path.relative(process.cwd(), 'index.html');
@@ -73,14 +121,11 @@ async function handleBuildResult (result) {
     }
   }
   
+  html = localize(html);
   return injectPackageJsonData(html);
 }
 
 async function injectPackageJsonData (html) {
-  const fileName = path.relative(process.cwd(), 'package.json');
-  const packageJsonFile = await fs.promises.readFile(fileName, 'utf8');
-  const packageJson = JSON.parse(packageJsonFile);
-
   const matches = html.match(/(?<={{)package\.json:.+?(?=}})/g);
 
   if (matches?.length > 0) {
@@ -124,4 +169,37 @@ async function startServer () {
   });
   server.listen(3000, 'localhost');
   console.log('Node server running at http://localhost:3000');
+}
+
+function localize (content) {
+  const translations = { ...english, ...activeLocale };
+  const currentLocaleName = localeName;
+  let result = content.replace(/\{\{localeName\}\}/g, currentLocaleName);
+  Object.keys(translations).forEach((key) => {
+    const regex = new RegExp(`\\{\\{translate: ?${key}\\}\\}`, 'g');
+    result = result.replace(regex, translations[key]);
+  });
+  return result;
+}
+
+function injectPackageVariables (content) {
+  const matches = content.match(/(?<={{)package\.json:.+?(?=}})/g);
+  if (!matches?.length) return content;
+  let result = content;
+  matches.map(match => {
+    const value = match.replace('package.json:', '').trim();
+    const replace = value.split('.').reduce((res, current) => {
+      if (res === null) {
+        return packageJson[current] ?? '';
+      }
+      return res[current] ?? '';
+    }, null);
+    return {
+      match: `{{${match}}}`,
+      replace,
+    };
+  }).forEach(m => {
+    result = result.replace(m.match, m.replace);
+  });
+  return result;
 }

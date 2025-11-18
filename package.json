@@ -11,6 +11,7 @@
   },
   "scripts": {
     "start": "node scripts/develop.js",
+    "dev": "node scripts/develop.js",
     "build": "node scripts/build.js",
     "test": "npm run build && node scripts/test-build.js"
   },
